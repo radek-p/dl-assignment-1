@@ -7,6 +7,16 @@ from PIL import Image
 from tensorflow.examples.tutorials.mnist import input_data as mnist_input
 
 
+def gkern(l=5, sig=1.):
+    """
+    creates gaussian kernel with side length l and a sigma of sig
+    """
+    ax = np.arange(-l // 2 + 1., l // 2 + 1.)
+    xx, yy = np.meshgrid(ax, ax)
+    kernel = np.exp(-(xx ** 2 + yy ** 2) / (2. * sig ** 2))
+    return kernel / np.sum(kernel)
+
+
 class LayerBuilder(object):
     def __init__(self, parameters=None):
         self.parameters = {
@@ -71,7 +81,7 @@ class Trainer(object):
         self.parameters = {
             "input_size": 28,
             "class_num": 10,
-            "training_steps": 2000,
+            "training_steps": 10000,
             "dreaming_steps": 2000,
             "save_path_prefix": "./models3",
         }
@@ -83,8 +93,9 @@ class Trainer(object):
         size_0 = self.parameters["input_size"]
         dream_count = self.parameters["class_num"]
 
-        # Boolean switches
+        # Model switches
         is_dreaming = tf.placeholder(tf.bool, name="is_dreaming")
+        keep_probability = tf.placeholder(tf.float32, name="keep_probability")
 
         # Network placeholders and gates
         x = tf.placeholder(tf.float32, [None, size_0, size_0, 1], name="x")
@@ -93,15 +104,16 @@ class Trainer(object):
         signal = tf.cond(is_dreaming, lambda: dream, lambda: x)
 
         # Layers
-        signal, cn1 = self.layers.conv2d_with_bn(signal, 5, 1, 32, "cn1")
+        signal, cn1 = self.layers.conv2d_with_bn(signal, 5, 1, 48, "cn1")
         signal = tf.nn.relu(signal)
         signal, mp1 = self.layers.max_pool(signal, 2, "mp1")
-        signal, cn2 = self.layers.conv2d_with_bn(signal, 5, 32, 64, "cn2")
+        signal, cn2 = self.layers.conv2d_with_bn(signal, 5, 48, 64, "cn2")
         signal = tf.nn.relu(signal)
         signal, mp2 = self.layers.max_pool(signal, 2, "mp2")
         signal = tf.reshape(signal, [-1, 7 * 7 * 64])
         signal, fc1 = self.layers.fully_connected(signal, 7 * 7 * 64, 1024, "fc1")
         signal = tf.nn.relu(signal)
+        signal = tf.nn.dropout(signal, keep_probability)
         signal, fc2 = self.layers.fully_connected(signal, 1024, 10, "fc2")
         result = tf.nn.softmax(signal)
 
@@ -113,7 +125,7 @@ class Trainer(object):
         contrast = tf.reduce_mean(-tf.multiply(dream, tf.subtract(dream, 1.)))
 
         # Training operations
-        training_step = tf.train.AdamOptimizer(1e-4).minimize(error)
+        training_step = tf.train.AdamOptimizer(1e-3).minimize(error)
         # training_step = tf.train.AdamOptimizer(1e-4).minimize(cross_entropy)
         dreaming_optimizer = tf.train.AdamOptimizer(1e-2)
         dreaming_step_1 = dreaming_optimizer.minimize(error + contrast, var_list=[dream])
@@ -130,7 +142,7 @@ class Trainer(object):
         self.session.run(tf.global_variables_initializer())
 
         for step in range(self.parameters["training_steps"] + 1):
-            x, y = self.input_data.train.next_batch(50)
+            x, y = self.input_data.train.next_batch(100)
             x = self.preprocess_input(x)
 
             self.session.run(
@@ -139,6 +151,7 @@ class Trainer(object):
                     self.model["x"]: x,
                     self.model["y"]: y,
                     self.model["is_dreaming"]: False,
+                    self.model["keep_probability"]: 0.5,
                 }
             )
 
@@ -154,12 +167,14 @@ class Trainer(object):
                 self.model["x"]: self.preprocess_input(self.input_data.test.images),
                 self.model["y"]: self.input_data.test.labels,
                 self.model["is_dreaming"]: False,
+                self.model["keep_probability"]: 1.,
             }
         )
         print("\n[{}] accuracy: {}".format(step, accuracy))
 
     def save_trained_values(self, name):
-        save_path = self.model["saver"].save(self.session, '{}/{}.ckpt'.format(self.parameters["save_path_prefix"], name))
+        save_path = self.model["saver"].save(self.session,
+                                             '{}/{}.ckpt'.format(self.parameters["save_path_prefix"], name))
         print("Model values saved: {}".format(save_path))
 
     def load_trained_values(self, name):
@@ -168,22 +183,45 @@ class Trainer(object):
         print("Model values restored from checkpoint: {}".format(checkpoint_path))
 
     def imagine_classes(self):
+        initial_img = Image.open("v_initial.png")
+        initial_arr = np.asarray(initial_img, dtype=np.uint8)
+        initial_arr = (initial_arr / 255.)
+        initial_arr = np.reshape(initial_arr, [28, 28, 1])
+        initial_arr = np.broadcast_to(initial_arr, [10, 28, 28, 1])
+        # initial_arr = [initial_arr for i in range(10)]
+        # initial_arr = 0.5 * np.ones([10, self.parameters["input_size"], self.parameters["input_size"], 1])
+
         class_vectors = np.eye(self.parameters["class_num"])
         self.session.run(
             tf.assign(
                 self.model["dream"],
-                0.5 * np.ones([1, self.parameters["input_size"], self.parameters["input_size"], 1])
+                initial_arr
             )
         )
         blank_x = np.zeros([1, 28, 28, 1])
+        kernel = gkern(3)
+        kernel = np.reshape(kernel, [3, 3, 1, 1])
+        dream = self.model["dream"]
 
         for step in range(self.parameters["dreaming_steps"] + 1):
+            blur = tf.nn.conv2d(dream, kernel, [1, 1, 1, 1], "SAME")
+            # self.session.run([opt_step, ],
+            #          feed_dict={x: [blank_image], y_: [class_one_hot], keep_prob: 1.0, is_dreaming: True})
+
+            opt_target = self.model["dreaming_step_1"] if step < 300 else self.model["dreaming_step_2"]
             self.session.run(
-                self.model["dreaming_step_1"],
+                fetches=[
+                    self.model["dreaming_step_1"],
+                    tf.assign(
+                        dream,
+                        tf.clip_by_value((0.99 * dream + 0.01 * blur), 0., 1.)
+                    )
+                ],
                 feed_dict={
                     self.model["x"]: blank_x,
                     self.model["y"]: class_vectors,
                     self.model["is_dreaming"]: True,
+                    self.model["keep_probability"]: 1.0,
                 }
             )
             if step % 50 == 0:
@@ -192,19 +230,25 @@ class Trainer(object):
                 print(".", end="", flush=True)
 
     def imagine_classes__report_stats(self, step, blank_x, class_vectors):
-        results = self.session.run(
-            fetches=self.model["dream"],
+        results, softmax_v = self.session.run(
+            fetches=[self.model["dream"], self.model["result"]],
             feed_dict={
-                #     self.model["x"]: blank_x,
-                #     self.model["y"]: class_vectors,
-                #     self.model["is_dreaming"]: False,
+                self.model["x"]: blank_x,
+                self.model["y"]: class_vectors,
+                self.model["is_dreaming"]: True,
+                self.model["keep_probability"]: 1.0,
             }
         )
 
         results = np.reshape(results, [-1, self.parameters["input_size"], self.parameters["input_size"]])
         results = np.clip(255 * results, 0, 255).astype(np.uint8)
-        result = np.concatenate(results, 0)
+        left = np.concatenate(results[0:5], 0)
+        right = np.concatenate(results[5:10], 0)
+        print(left.shape, right.shape)
+        result = np.concatenate([left, right], 1)
         im = Image.fromarray(result)
+        probs = {i: softmax_v[i, i] for i in range(10)}
+        print("\n", step, probs)
         im.save("outputs/{}.png".format(step))
 
 
@@ -226,15 +270,18 @@ def run_visualization(trainer):
 
 
 def main(argv):
+    print("Modified version of script, again! ")
     with tf.Session() as session:
         mnist = mnist_input.read_data_sets("./data/", one_hot=True)
         trainer = Trainer(session, mnist)
         trainer.create_model()
-        should_train = True
+        should_train = False
         if should_train:
             trainer.train_model()
+            trainer.save_trained_values("checkpoint1")
         else:
-            trainer.load_trained_values("filename?")
+            trainer.load_trained_values("checkpoint1")
+            trainer.imagine_classes()
 
 
 if __name__ == "__main__":
