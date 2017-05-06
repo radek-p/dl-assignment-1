@@ -1,2 +1,6 @@
 .idea/
 data/
+outputs/
+models3/
+experiment*.py
+.DS_Store

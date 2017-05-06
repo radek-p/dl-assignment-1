@@ -37,9 +37,6 @@ class LayerBuilder(object):
         # apply convolution filters
         signal = tf.nn.conv2d(signal, W, strides=[1, 1, 1, 1], padding="SAME")
 
-        # b = tf.Variable(tf.constant(0.1, shape=[out_channels]), name=f"{basename}_b")
-        # signal += b
-
         # normalize
         mean = tf.reduce_mean(signal, axis=[0, 1, 2])
         signal -= mean
@@ -84,9 +81,14 @@ class Trainer(object):
             "training_steps": 10000,
             "dreaming_steps": 2000,
             "save_path_prefix": "./models3",
+            "dream_points_num": 11,
         }
         if parameters is not None:
             self.parameters.update(parameters)
+
+    def create_dream_from_points(self, dream_points):
+        intermediate_points_num = 8
+
 
     def create_model(self):
         print("Creating the model")
@@ -100,7 +102,12 @@ class Trainer(object):
         # Network placeholders and gates
         x = tf.placeholder(tf.float32, [None, size_0, size_0, 1], name="x")
         y = tf.placeholder(tf.float32, [None, 10], name="y")
-        dream = tf.Variable(tf.zeros([dream_count, size_0, size_0, 1]), name="dream")
+        dream_points = tf.Variable(
+            tf.random_uniform([dream_count, self.parameters["dream_points_num"], 2], 0., 27.),
+            name="dream_points"
+        )
+        # dream = tf.Variable(tf.zeros([dream_count, size_0, size_0, 1]), name="dream")
+        dream, dr1 = self.create_dream_from_points(dream_points)
         signal = tf.cond(is_dreaming, lambda: dream, lambda: x)
 
         # Layers
@@ -183,6 +190,7 @@ class Trainer(object):
         print("Model values restored from checkpoint: {}".format(checkpoint_path))
 
     def imagine_classes(self):
+        # initial_img = Image.open("initial_test3.png")
         initial_img = Image.open("v_initial.png")
         initial_arr = np.asarray(initial_img, dtype=np.uint8)
         initial_arr = (initial_arr / 255.)
@@ -201,17 +209,21 @@ class Trainer(object):
         blank_x = np.zeros([1, 28, 28, 1])
         kernel = gkern(3)
         kernel = np.reshape(kernel, [3, 3, 1, 1])
+        bkernel = gkern(21, 5.)
+        bkernel = np.reshape(bkernel, [21, 21, 1, 1])
         dream = self.model["dream"]
+        blur = tf.nn.conv2d(dream, kernel, [1, 1, 1, 1], "SAME")
+        treshold = tf.cast(dream > 0.3, tf.float32) * 0.7
+        b_threshold = tf.nn.conv2d(treshold, bkernel, [1, 1, 1, 1], "SAME")
 
         for step in range(self.parameters["dreaming_steps"] + 1):
-            blur = tf.nn.conv2d(dream, kernel, [1, 1, 1, 1], "SAME")
             # self.session.run([opt_step, ],
             #          feed_dict={x: [blank_image], y_: [class_one_hot], keep_prob: 1.0, is_dreaming: True})
 
             opt_target = self.model["dreaming_step_1"] if step < 300 else self.model["dreaming_step_2"]
             self.session.run(
                 fetches=[
-                    self.model["dreaming_step_1"],
+                    opt_target,
                     tf.assign(
                         dream,
                         tf.clip_by_value((0.99 * dream + 0.01 * blur), 0., 1.)
@@ -224,6 +236,11 @@ class Trainer(object):
                     self.model["keep_probability"]: 1.0,
                 }
             )
+
+            if step % 200 == 199:
+                self.session.run(tf.assign(dream, b_threshold))
+                print("Applied threshold!!")
+
             if step % 50 == 0:
                 self.imagine_classes__report_stats(step, blank_x, class_vectors)
             else:
