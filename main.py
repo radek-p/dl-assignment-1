@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import sys
 
+import math
 import numpy as np
 import tensorflow as tf
 from PIL import Image
@@ -82,7 +83,7 @@ class Trainer(object):
             "training_steps": 10000,
             "dreaming_steps": 2000,
             "save_path_prefix": "./models3",
-            "dream_points_num": 8,
+            "dream_points_num": 7,
         }
         if parameters is not None:
             self.parameters.update(parameters)
@@ -101,7 +102,8 @@ class Trainer(object):
         y = tf.placeholder(tf.float32, [None, 10], name="y")
 
         dream_points_num = self.parameters["dream_points_num"]
-        line_segments_num = dream_points_num // 2  # - 1
+        # line_segments_num = dream_points_num // 2
+        line_segments_num = dream_points_num - 1  #- 5
         big_dream_size = 28 * 3
         dream_points = tf.Variable(
             tf.random_uniform([dream_count, dream_points_num, 1, 1, 2, 1], 0., big_dream_size),
@@ -114,8 +116,16 @@ class Trainer(object):
         coords = np.stack([coord1, coord2], 2)  # shape [bds, bds, 2]
         coords = np.reshape(coords, [1, 1, big_dream_size, big_dream_size, 2, 1])
 
+        # p1 = dream_points[:, 0::2, :, :]
+        # p1 = p1[:, :-1, :, :]
+        # p2 = dream_points[:, 1::2, :, :]
+
+        # p1 = dream_points[:, :-6, :, :]
+        # p2 = dream_points[:, 1:-5, :, :]
+
         p1 = dream_points[:, :-1, :, :]
         p2 = dream_points[:, 1:, :, :]
+
         _v = coords - p1
         _s = p1 - p2
         _s = tf.tile(_s, [1, 1, big_dream_size, big_dream_size, 1, 1])
@@ -127,16 +137,19 @@ class Trainer(object):
 
         z = p1 + p2 - 2 * proj
         d2 = tf.matmul(z, z, True)
-        projects_on_segment = tf.sigmoid(d - d2)
-        projects_on_segment = tf.reshape(projects_on_segment, [dream_count, line_segments_num, big_dream_size, big_dream_size, 1])
+        projects_on_segment = tf.sigmoid((tf.sqrt(d + 1e-6) - tf.sqrt(d2 + 1e-6)) * 0.25)
+
+        # projects_on_segment = tf.sigmoid(d - d2)
+        projects_on_segment = tf.reshape(projects_on_segment,
+                                         [dream_count, line_segments_num, big_dream_size, big_dream_size, 1])
 
         vecs = coords - proj
         dots = tf.matmul(vecs, vecs, True)
         dist = tf.sqrt(dots + 1e-6)
-        is_close_to_segment = tf.reduce_max(tf.sigmoid(3. - dist), [4])
+        is_close_to_segment = tf.reduce_max(tf.sigmoid((3. - dist) * 0.5), [4])
 
         big_dream = projects_on_segment * is_close_to_segment
-        big_dream = tf.reduce_max(big_dream, 1)
+        big_dream = tf.reduce_mean(big_dream, 1)
         # big_dream = tf.reduce_max(tf.sigmoid(proj - p1) * tf.sigmoid(p2 - proj), [1, 4])
         print("big_dream.shape", big_dream.shape)
         dream = tf.image.resize_bilinear(big_dream, [28, 28], name="dream")
@@ -169,10 +182,12 @@ class Trainer(object):
         contrast = tf.reduce_mean(-tf.multiply(dream, tf.subtract(dream, 1.)))
 
         # Training operations
-        training_step = tf.train.AdamOptimizer(1e-3).minimize(cross_entropy, var_list=v1+v2+v3+v4)
+        training_step = tf.train.AdamOptimizer(1e-3).minimize(cross_entropy, var_list=v1 + v2 + v3 + v4)
         # training_step = tf.train.AdamOptimizer(1e-4).minimize(cross_entropy)
-        dreaming_optimizer = tf.train.AdamOptimizer(1.)
+        dreaming_optimizer = tf.train.AdamOptimizer(0.05)
         # dreaming_optimizer = tf.train.GradientDescentOptimizer(0.0000000000000001)
+        black_ratio = 1. - tf.reduce_mean(dream)
+        optimize_white_balance = dreaming_optimizer.minimize(cross_entropy + black_ratio, var_list=[dream_points])
         dreaming_step_1 = dreaming_optimizer.minimize(cross_entropy + contrast, var_list=[dream_points])
         dreaming_step_2 = dreaming_optimizer.minimize(cross_entropy, var_list=[dream_points])
 
@@ -239,17 +254,22 @@ class Trainer(object):
 
         # 10, 7, 1, 1, 2, 1
         initial_points = np.zeros([self.parameters["dream_points_num"], 2])
-        initial_points[0,:] = [5, 20]
-        initial_points[1,:] = [42, 5]
-        initial_points[2,:] = [79, 20]
-        initial_points[3,:] = [42, 42]
-        initial_points[4,:] = [5, 59]
-        initial_points[5,:] = [42, 79]
-        initial_points[6,:] = [79, 59]
-        initial_points[7,:] = [79, 39]
+        # for i in range(self.parameters["dream_points_num"]):
+        #     angle = 2. * math.pi * i / 7 + 0.1 * 2. * math.pi
+        #     initial_points[i, :] += 15. * np.array([math.sin(angle), math.cos(angle)])
+        #     initial_points[i, 1] *= 1.3
+        #     initial_points[i, :] += [42, 42]
+        initial_points[0, :] = [42, 10]
+        initial_points[1, :] = [62, 30]
+        initial_points[2, :] = [22, 54]
+        initial_points[3, :] = [42, 74]
+        initial_points[4, :] = [62, 54]
+        initial_points[5, :] = [22, 30]
+        initial_points[6, :] = [42, 10]
+        # initial_points[7,:] = [79, 39]
         initial_points = np.tile(initial_points, [10, 1, 1])
         initial_points = initial_points.reshape([10, self.parameters["dream_points_num"], 1, 1, 2, 1])
-        # initial_points = tf.random_uniform([10, 7, 1, 1, 2, 1], 1., 83.)
+        # initial_points = tf.random_normal([10, 7, 1, 1, 2, 1], 42., 30.)
         class_vectors = np.eye(self.parameters["class_num"])
         self.session.run(
             tf.assign(
@@ -279,6 +299,8 @@ class Trainer(object):
                 print(".", end="", flush=True)
 
             opt_target = self.model["dreaming_step_2"]
+            # opt_target = self.model["optimize_white_balance"]
+
             pts, _ = self.session.run(
                 fetches=[
                     self.model["dream_points"],
@@ -301,7 +323,6 @@ class Trainer(object):
             # if step % 200 == 199:
             #     self.session.run(tf.assign(dream, b_threshold))
             #     print("Applied threshold!!")
-
 
     def imagine_classes__report_stats(self, step, blank_x, class_vectors):
         # x = self.model["dream_points"]

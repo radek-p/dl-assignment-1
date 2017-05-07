@@ -52,7 +52,8 @@ d2 = tf.matmul(z, z, True)
 # dcond1y = cond1[:, 0, :, :, 1, :]
 # dcond2y = cond2[:, 0, :, :, 1, :]
 # projects_on_segment = tf.reduce_max(cond1 * cond2, [4])
-projects_on_segment = tf.sigmoid(tf.sqrt(d) - tf.sqrt(d2))
+# projects_on_segment = tf.sigmoid(tf.sqrt(d) - tf.sqrt(d2))
+projects_on_segment = tf.sigmoid((tf.sqrt(d + 1e-6) - tf.sqrt(d2 + 1e-6)) * 0.125)
 print("projects:", projects_on_segment.shape)
 projects_on_segment = tf.reshape(projects_on_segment, [dream_count, line_segments_num, big_dream_size, big_dream_size, 1])
 
@@ -61,7 +62,7 @@ print("vecs: ", vecs.shape)
 dots = tf.matmul(vecs, vecs, True)
 print("dots: ", dots.shape)
 dist = tf.sqrt(dots + 1e-6)
-is_close_to_segment = tf.reduce_max(tf.sigmoid(3. - dist), [4])
+is_close_to_segment = tf.reduce_max(tf.sigmoid((3. - dist) * 0.5), [4])
 
 big_dream = projects_on_segment * is_close_to_segment
 big_dream = tf.reduce_max(big_dream, 1)
