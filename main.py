@@ -99,8 +99,8 @@ class Trainer(object):
             circle_points.append(np.matmul(rot, circle_points[-2]))
         circle1 = np.array(list(zip(circle_points[:-1], circle_points[1:])), dtype=np.float32)
         circle2 = circle1.copy()
-        circle1[:, :, 1] -= 6.
-        circle2[:, :, 1] += 6.
+        circle1[:, :, 1] -= 6
+        circle2[:, :, 1] += 6
 
         # draw rectangular frame
         horizontal_lines = [[(x, y), (0, y)] for y in [-12, 0, 12] for x in [-6, 6]]
@@ -112,17 +112,16 @@ class Trainer(object):
 
         line_segments = np.concatenate((circle1, circle2, frame, diagonal), 0)
         line_segments *= 0.66  # .74, .70
-        # center = np.array([14, 14])
-        # line_segments += center - [1, 1]
         return line_segments
 
     def create_dream(self, create_variables_only):
-        dream_count = self.parameters["class_num"]
+        class_num = self.parameters["class_num"]
         line_segments_num = self.parameters["line_segments_num"]
         canvas_size = self.parameters["input_size"]
+        epsilon = 1e-6
 
-        scales = tf.Variable(tf.ones([dream_count, line_segments_num, 1, 1, 1, 1]))
-        opacities = tf.Variable(tf.ones([dream_count, line_segments_num, 1, 1, 1]))
+        scales = tf.Variable(tf.ones([class_num, line_segments_num, 1, 1, 1, 1]))
+        opacities = tf.Variable(tf.ones([class_num, line_segments_num, 1, 1, 1]))
 
         trainable_variables = [scales, opacities]
 
@@ -131,7 +130,8 @@ class Trainer(object):
             # In a training mode we don't have to create graph nodes that are only used in the dreaming phase.
             # However, variables related to dreaming still need to be somehow connected to the main graph,
             # or they would not be saved, this would cause problems in second phase.
-            canvas = tf.ones([dream_count, canvas_size, canvas_size, 1]) * scales[0, 0, 0, 0, 0] * opacities[0, 0, 0, 0, 0]
+            canvas = tf.ones([class_num, canvas_size, canvas_size, 1]) \
+                     * scales[0, 0, 0, 0, 0] * opacities[0, 0, 0, 0, 0]
             return canvas, locals(), trainable_variables
 
         coord1 = np.broadcast_to(np.arange(canvas_size, dtype=np.float32), [canvas_size, canvas_size])
@@ -141,28 +141,28 @@ class Trainer(object):
         coords = np.reshape(coords, [1, 1, canvas_size, canvas_size, 2, 1])
 
         line_segments = self.prepare_initial_line_segments()
-        line_segments = np.broadcast_to(line_segments, [dream_count, line_segments_num, 2, 2])
-        line_segments = line_segments * tf.reshape(scales, [dream_count, line_segments_num, 1, 1])
+        line_segments = np.broadcast_to(line_segments, [class_num, line_segments_num, 2, 2])
+        line_segments = line_segments * tf.reshape(scales, [class_num, line_segments_num, 1, 1])
         line_segments += np.array([13, 13])
-        line_segments = tf.reshape(line_segments, [dream_count, line_segments_num, 1, 1, 2, 2, 1])
+        line_segments = tf.reshape(line_segments, [class_num, line_segments_num, 1, 1, 2, 2, 1])
         p1, p2 = tf.unstack(line_segments, axis=4)
 
         v = coords - p1
         s = p1 - p2
         s = tf.tile(s, [1, 1, canvas_size, canvas_size, 1, 1])
         s_norm2 = tf.matmul(s, s, True)
-        projection = tf.matmul(v, s, True) / (s_norm2 + 1e-6) * s
+        projection = tf.matmul(v, s, True) / (s_norm2 + epsilon) * s
         projection = projection + p1
 
         z = p1 + p2 - 2 * projection
         z_norm2 = tf.matmul(z, z, True)
 
-        projects_on_segment = tf.sigmoid((tf.sqrt(s_norm2 + 1e-6) - tf.sqrt(z_norm2 + 1e-6)) * 2.)
+        projects_on_segment = tf.sigmoid((tf.sqrt(s_norm2 + epsilon) - tf.sqrt(z_norm2 + epsilon)) * 2.)
         projects_on_segment = tf.reshape(projects_on_segment,
-                                         [dream_count, line_segments_num, canvas_size, canvas_size, 1])
+                                         [class_num, line_segments_num, canvas_size, canvas_size, 1])
 
         l = coords - projection
-        l_norm = tf.sqrt(tf.matmul(l, l, True) + 1e-6)
+        l_norm = tf.sqrt(tf.matmul(l, l, True) + epsilon)
         is_close_to_segment = tf.reduce_max(tf.sigmoid((0.5 - l_norm) * 2.), [4])
 
         canvas = projects_on_segment * is_close_to_segment * opacities
@@ -172,7 +172,7 @@ class Trainer(object):
 
     def create_model(self, trimmed_for_faster_training):
         print("Creating the model")
-        size_0 = self.parameters["input_size"]
+        input_size = self.parameters["input_size"]
 
         # Model switches
         is_dreaming = tf.placeholder(tf.bool, name="is_dreaming")
@@ -180,12 +180,12 @@ class Trainer(object):
         keep_probability = tf.placeholder(tf.float32, name="keep_probability")
 
         # Network placeholders and gates
-        x = tf.placeholder(tf.float32, [None, size_0, size_0, 1], name="x")
+        x = tf.placeholder(tf.float32, [None, input_size, input_size, 1], name="x")
         y = tf.placeholder(tf.float32, [None, 10], name="y")
 
-        dream, init, v0 = self.create_dream(trimmed_for_faster_training)
+        canvas, init, v0 = self.create_dream(trimmed_for_faster_training)
 
-        signal = tf.cond(is_dreaming, lambda: dream, lambda: x)
+        signal = tf.cond(is_dreaming, lambda: canvas, lambda: x)
 
         # Layers
         signal, cn1, v1 = self.layers.conv2d_with_bn(signal, 5, 1, 48, is_training, "cn1")
@@ -202,32 +202,19 @@ class Trainer(object):
         result = tf.nn.softmax(signal)
 
         # Measures
-        cross_entropy = -tf.reduce_sum(y * tf.log(tf.clip_by_value(result, 1e-10, 1.0)))
-        # error = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(labels=y, logits=signal, name="error"))
-        error = cross_entropy
-
+        # cross_entropy = -tf.reduce_sum(y * tf.log(tf.clip_by_value(result, 1e-10, 1.0)))
+        cross_entropy = tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits(labels=y, logits=signal, name="error"))
         is_correct = tf.equal(tf.argmax(result, 1), tf.argmax(y, 1), name="is_correct")
         accuracy = tf.reduce_mean(tf.cast(is_correct, tf.float32), name="accuracy")
-
-        contrast = tf.reduce_mean(-tf.multiply(dream, tf.subtract(dream, 1.)))
-        white_ratio = tf.reduce_mean(dream)
-        black_ratio = 1. - white_ratio
-        # opacities = tf.clip_by_value(v0[1], 0., 1.)
-        opacities = v0[1]  # tf.clip_by_value(v0[1], 0., 1.)
-        opacities_contrast = tf.reduce_mean(tf.square(-tf.multiply(opacities, tf.subtract(opacities, 1.))))
+        white_ratio = tf.reduce_mean(canvas)
 
         # Training operations
         training_step = tf.train.AdamOptimizer(1e-3).minimize(cross_entropy, var_list=v1 + v2 + v3 + v4)
-        # training_step = tf.train.AdamOptimizer(1e-4).minimize(cross_entropy)
-        dreaming_optimizer = tf.train.AdamOptimizer(0.05, name="dreaming_optimizer")
-        training_step_2 = dreaming_optimizer.minimize(cross_entropy, var_list=v1 + v2 + v3 + v4)
 
-        # optimize_white_balance = dreaming_optimizer.minimize(cross_entropy + white_ratio * 100, var_list=v0)
-        dreaming_step_1 = dreaming_optimizer.minimize(
-            cross_entropy + tf.square(white_ratio - 0.02) * 100 + opacities_contrast * 30, var_list=v0)
-        # dreaming_step_2 = dreaming_optimizer.minimize(cross_entropy, var_list=v0)
+        dreaming_optimizer = tf.train.AdamOptimizer(0.05, name="dreaming_optimizer")
         dreaming_step_1 = dreaming_optimizer.minimize(cross_entropy + tf.square(white_ratio - 0.11) * 100, var_list=v0)
         dreaming_step_2 = dreaming_optimizer.minimize(cross_entropy, var_list=v0)
+        second_part_of_the_hack = dreaming_optimizer.minimize(cross_entropy, var_list=v1 + v2 + v3 + v4)
 
         saver = tf.train.Saver()
         self.model = locals()
@@ -318,7 +305,7 @@ class Trainer(object):
         wr, results, softmax_v = self.session.run(
             fetches=[
                 self.model["white_ratio"],
-                self.model["dream"],
+                self.model["canvas"],
                 self.model["result"],
             ],
             feed_dict={
