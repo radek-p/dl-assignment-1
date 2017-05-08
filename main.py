@@ -104,33 +104,87 @@ class Trainer(object):
         coords = np.stack([coord1, coord2], 2)
         coords = np.reshape(coords, [1, 1, big_dream_size, big_dream_size, 2, 1])
 
+        center = np.array([14, 14])
+        l = 6
+        circle = np.array([
+            [(1.5, 1.5), (6, 0)],
+            [(1.5, 1.5), (0, 6)],
+            [(10.5, 1.5), (6, 0)],
+            [(10.5, 1.5), (12, 6)],
+
+            [(1.5, 10.5), (6, 12)],
+            [(1.5, 10.5), (0, 6)],
+            [(10.5, 10.5), (6, 12)],
+            [(10.5, 10.5), (12, 6)],
+        ], dtype=np.float32)
+
+        circle2 = circle.copy()
+        circle2[:, :, 1] += 12.
+
+        frame = np.array([
+            [(0, 0), (l, 0)],
+            [(l, 0), (2 * l, 0)],
+
+            [(0, 0), (0, l)],
+            [(0, l), (0, 2 * l)],
+            [(2 * l, 0), (2 * l, l)],
+            [(2 * l, l), (2 * l, 2 * l)],
+
+            [(0, 2 * l), (l, 2 * l)],
+            [(l, 2 * l), (2 * l, 2 * l)],
+
+            [(0, 2 * l), (0, 3 * l)],
+            [(0, 3 * l), (0, 4 * l)],
+            [(2 * l, 2 * l), (2 * l, 3 * l)],
+            [(2 * l, 3 * l), (2 * l, 4 * l)],
+
+            [(0, 4 * l), (l, 4 * l)],
+            [(l, 4 * l), (2 * l, 4 * l)],
+        ], dtype=np.float32)
+
+        diagonal = np.array([
+            [(12, 0), (6, 24)],
+            # [(12, 6), (0, 18)]
+        ], dtype=np.float32)
+
+        line_segments = np.concatenate((circle, circle2, frame, diagonal), 0)
+        line_segments -= [6, 12]
+        line_segments *= 0.8
+        line_segments += center
+
         # p1 = dream_points[:, 0::2, :, :]
         # p1 = p1[:, :-1, :, :]
         # p2 = dream_points[:, 1::2, :, :]
 
         # p1 = dream_points[:, :-6, :, :]
         # p2 = dream_points[:, 1:-5, :, :]
-        limit_sqr = 49
-        limit_sqrt = 7
-        dream_points_d = limit_sqrt
+        limit_sqr = 31
+        # limit_sqrt = 7
+        # dream_points_d = limit_sqrt
 
-        initial_points = np.zeros([line_segments_num, 2], dtype=np.float32)
-        for i in range(dream_points_num):
-            # initial_points[i, :] = [(i % dream_points_d) * 4 + 2, (i // dream_points_d) * 4 + 2]
-            initial_points[i, :] = [(i % dream_points_d) * 4. + 2., (i // dream_points_d) * 4. + 2.]
-        initial_points = np.tile(initial_points, [dream_count, 1, 1])
-        initial_points = initial_points.reshape([dream_count, dream_points_num, 1, 1, 2, 1])
+        # initial_points = np.zeros([line_segments_num, 2], dtype=np.float32)
+        # for i in range(dream_points_num):
+        #     # initial_points[i, :] = [(i % dream_points_d) * 4 + 2, (i // dream_points_d) * 4 + 2]
+        #     initial_points[i, :] = [(i % dream_points_d) * 4. + 2., (i // dream_points_d) * 4. + 2.]
+        # initial_points = np.tile(initial_points, [dream_count, 1, 1])
+        # initial_points = initial_points.reshape([dream_count, dream_points_num, 1, 1, 2, 1])
 
         # p1 = dream_points[:, :-1, :, :]
         # p2 = dream_points[:, 1:, :, :]
-        initial_points = initial_points[:, 0:limit_sqr, :, :, :, :]
+        # initial_points = initial_points[:, 0:limit_sqr, :, :, :, :]
         angles = angles[:, 0:limit_sqr, :, :, :]
         opacities = opacities[:, 0:limit_sqr, :, :, :]
         line_segments_num = limit_sqr
         dream_points_num = limit_sqr
 
-        p1 = initial_points
-        p2 = p1 + tf.stack([tf.sin(angles), tf.cos(angles)], 4) * 4.
+        p1 = line_segments[:, 0, :]
+        p2 = line_segments[:, 1, :]
+
+        p1 = np.tile(p1, [dream_count, 1, 1])
+        p1 = p1.reshape([dream_count, dream_points_num, 1, 1, 2, 1])
+        p2 = np.tile(p2, [dream_count, 1, 1])
+        p2 = p2.reshape([dream_count, dream_points_num, 1, 1, 2, 1])
+        # p2 = p1 + tf.stack([tf.sin(angles), tf.cos(angles)], 4) * 4.
 
         _v = coords - p1
         _s = p1 - p2
@@ -217,7 +271,8 @@ class Trainer(object):
         training_step_2 = dreaming_optimizer.minimize(cross_entropy, var_list=v1 + v2 + v3 + v4)
 
         # optimize_white_balance = dreaming_optimizer.minimize(cross_entropy + white_ratio * 100, var_list=v0)
-        dreaming_step_1 = dreaming_optimizer.minimize(cross_entropy + tf.square(white_ratio - 0.12) * 100 + opacities_contrast * 30, var_list=v0)
+        dreaming_step_1 = dreaming_optimizer.minimize(
+            cross_entropy + tf.square(white_ratio - 0.12) * 100 + opacities_contrast * 30, var_list=v0)
         dreaming_step_2 = dreaming_optimizer.minimize(cross_entropy, var_list=v0)
 
         saver = tf.train.Saver()
@@ -300,7 +355,7 @@ class Trainer(object):
             else:
                 print(".", end="", flush=True)
 
-            opt_target = self.model["dreaming_step_1"]
+            opt_target = self.model["dreaming_step_2"]
 
             _ = self.session.run(
                 fetches=[
