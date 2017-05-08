@@ -7,8 +7,6 @@ from PIL import Image
 from tensorflow.examples.tutorials.mnist import input_data as mnist_input
 
 
-# from tensorflow.python import debug as tf_debug
-
 class LayerBuilder(object):
     def __init__(self, parameters=None):
         self.parameters = {
@@ -87,38 +85,14 @@ class Trainer(object):
             "training_steps": 10000,
             "dreaming_steps": 2000,
             "save_path_prefix": "./models3",
-            "dream_points_num": 49,
-            "dream_points_d": 7,
+            "line_segments_num": 31,
         }
         if parameters is not None:
             self.parameters.update(parameters)
 
-    def create_dream(self, create_variables_only):
-        dream_count = self.parameters["class_num"]
-        dream_points_num = self.parameters["dream_points_num"]
-        dream_points_d = self.parameters["dream_points_d"]
-        line_segments_num = dream_points_num
-        dream_size = self.parameters["input_size"]
-        # big_dream_size = dream_size * 3
-        big_dream_size = dream_size
-
-        angles = tf.Variable(tf.zeros([dream_count, line_segments_num, 1, 1, 1]))
-        opacities = tf.Variable(tf.ones([dream_count, line_segments_num, 1, 1, 1]))
-
-        trainable_variables = [angles, opacities]
-
-        if create_variables_only:
-            dream = tf.ones([dream_count, dream_size, dream_size, 1]) * angles[0, 0, 0, 0, 0] * opacities[0, 0, 0, 0, 0]
-            return dream, locals(), trainable_variables
-
-        coord1 = np.broadcast_to(np.arange(big_dream_size, dtype=np.float32), [big_dream_size, big_dream_size])
-        coord2 = coord1.T
-
-        coords = np.stack([coord1, coord2], 2)
-        coords = np.reshape(coords, [1, 1, big_dream_size, big_dream_size, 2, 1])
-
-
-        # Draw eight segment circle approximation
+    @staticmethod
+    def prepare_initial_line_segments():
+        # Draw circle
         rot = np.array([[0, -1], [1, 0]])
         circle_points = [np.array([0, -6]), np.array([4.5, -4.5])]
         for _ in range(7):
@@ -128,82 +102,73 @@ class Trainer(object):
         circle1[:, :, 1] -= 6.
         circle2[:, :, 1] += 6.
 
+        # draw rectangular frame
         horizontal_lines = [[(x, y), (0, y)] for y in [-12, 0, 12] for x in [-6, 6]]
         vertical_lines = [[(x, y), (x, y + 6)] for y in [-12, -6, 0, 6] for x in [-6, 6]]
         frame = np.array(horizontal_lines + vertical_lines, dtype=np.float32)
 
+        # draw diagonal
         diagonal = np.array([[(6, -12), (0, 12)]], dtype=np.float32)
 
         line_segments = np.concatenate((circle1, circle2, frame, diagonal), 0)
-        # line_segments -= [6, 12]
-        line_segments *= 0.66 # .74, .70
-        # line_segments *= (angles + 1.)[:,]
-        center = np.array([14, 14])
-        line_segments += center - [1, 1]
+        line_segments *= 0.66  # .74, .70
+        # center = np.array([14, 14])
+        # line_segments += center - [1, 1]
+        return line_segments
 
-        # p1 = dream_points[:, 0::2, :, :]
-        # p1 = p1[:, :-1, :, :]
-        # p2 = dream_points[:, 1::2, :, :]
+    def create_dream(self, create_variables_only):
+        dream_count = self.parameters["class_num"]
+        line_segments_num = self.parameters["line_segments_num"]
+        canvas_size = self.parameters["input_size"]
 
-        # p1 = dream_points[:, :-6, :, :]
-        # p2 = dream_points[:, 1:-5, :, :]
-        limit_sqr = 31
-        # limit_sqrt = 7
-        # dream_points_d = limit_sqrt
+        scales = tf.Variable(tf.ones([dream_count, line_segments_num, 1, 1, 1, 1]))
+        opacities = tf.Variable(tf.ones([dream_count, line_segments_num, 1, 1, 1]))
 
-        # initial_points = np.zeros([line_segments_num, 2], dtype=np.float32)
-        # for i in range(dream_points_num):
-        #     # initial_points[i, :] = [(i % dream_points_d) * 4 + 2, (i // dream_points_d) * 4 + 2]
-        #     initial_points[i, :] = [(i % dream_points_d) * 4. + 2., (i // dream_points_d) * 4. + 2.]
-        # initial_points = np.tile(initial_points, [dream_count, 1, 1])
-        # initial_points = initial_points.reshape([dream_count, dream_points_num, 1, 1, 2, 1])
+        trainable_variables = [scales, opacities]
 
-        # p1 = dream_points[:, :-1, :, :]
-        # p2 = dream_points[:, 1:, :, :]
-        # initial_points = initial_points[:, 0:limit_sqr, :, :, :, :]
-        angles = angles[:, 0:limit_sqr, :, :, :]
-        opacities = opacities[:, 0:limit_sqr, :, :, :]
-        line_segments_num = limit_sqr
-        dream_points_num = limit_sqr
+        if create_variables_only:
+            # This is a hack to make network training faster.
+            # In a training mode we don't have to create graph nodes that are only used in the dreaming phase.
+            # However, variables related to dreaming still need to be somehow connected to the main graph,
+            # or they would not be saved, this would cause problems in second phase.
+            canvas = tf.ones([dream_count, canvas_size, canvas_size, 1]) * scales[0, 0, 0, 0, 0] * opacities[0, 0, 0, 0, 0]
+            return canvas, locals(), trainable_variables
 
-        p1 = line_segments[:, 0, :]
-        p2 = line_segments[:, 1, :]
+        coord1 = np.broadcast_to(np.arange(canvas_size, dtype=np.float32), [canvas_size, canvas_size])
+        coord2 = coord1.T
 
-        p1 = np.tile(p1, [dream_count, 1, 1])
-        p1 = p1.reshape([dream_count, dream_points_num, 1, 1, 2, 1])
-        p2 = np.tile(p2, [dream_count, 1, 1])
-        p2 = p2.reshape([dream_count, dream_points_num, 1, 1, 2, 1])
-        # p2 = p1 + tf.stack([tf.sin(angles), tf.cos(angles)], 4) * 4.
+        coords = np.stack([coord1, coord2], 2)
+        coords = np.reshape(coords, [1, 1, canvas_size, canvas_size, 2, 1])
 
-        angles = tf.reshape(angles, [dream_count, dream_points_num, 1, 1, 1, 1])
-        p1 = p1 * (angles + 1.)
-        p2 = p2 * (angles + 1.)
-        _v = coords - p1
-        _s = p1 - p2
-        _s = tf.tile(_s, [1, 1, big_dream_size, big_dream_size, 1, 1])
-        g = tf.matmul(_v, _s, True)
-        d = tf.matmul(_s, _s, True)
-        rate = g / (d + 1e-6)
-        projection = rate * _s
+        line_segments = self.prepare_initial_line_segments()
+        line_segments = np.broadcast_to(line_segments, [dream_count, line_segments_num, 2, 2])
+        line_segments = line_segments * tf.reshape(scales, [dream_count, line_segments_num, 1, 1])
+        line_segments += np.array([13, 13])
+        line_segments = tf.reshape(line_segments, [dream_count, line_segments_num, 1, 1, 2, 2, 1])
+        p1, p2 = tf.unstack(line_segments, axis=4)
+
+        v = coords - p1
+        s = p1 - p2
+        s = tf.tile(s, [1, 1, canvas_size, canvas_size, 1, 1])
+        s_norm2 = tf.matmul(s, s, True)
+        projection = tf.matmul(v, s, True) / (s_norm2 + 1e-6) * s
         projection = projection + p1
 
         z = p1 + p2 - 2 * projection
-        d2 = tf.matmul(z, z, True)
+        z_norm2 = tf.matmul(z, z, True)
 
-        projects_on_segment = tf.sigmoid((tf.sqrt(d + 1e-6) - tf.sqrt(d2 + 1e-6)) * 2.)
-
+        projects_on_segment = tf.sigmoid((tf.sqrt(s_norm2 + 1e-6) - tf.sqrt(z_norm2 + 1e-6)) * 2.)
         projects_on_segment = tf.reshape(projects_on_segment,
-                                         [dream_count, line_segments_num, big_dream_size, big_dream_size, 1])
+                                         [dream_count, line_segments_num, canvas_size, canvas_size, 1])
 
-        vecs = coords - projection
-        dots = tf.matmul(vecs, vecs, True)
-        dist = tf.sqrt(dots + 1e-6)
-        is_close_to_segment = tf.reduce_max(tf.sigmoid((0.5 - dist) * 2.), [4])
+        l = coords - projection
+        l_norm = tf.sqrt(tf.matmul(l, l, True) + 1e-6)
+        is_close_to_segment = tf.reduce_max(tf.sigmoid((0.5 - l_norm) * 2.), [4])
 
-        dream = projects_on_segment * is_close_to_segment * opacities
-        dream = tf.clip_by_value(tf.reduce_sum(dream, 1), 0., 1.)
+        canvas = projects_on_segment * is_close_to_segment * opacities
+        canvas = tf.clip_by_value(tf.reduce_sum(canvas, 1), 0., 1.)
 
-        return dream, locals(), trainable_variables
+        return canvas, locals(), trainable_variables
 
     def create_model(self, trimmed_for_faster_training):
         print("Creating the model")
@@ -246,7 +211,6 @@ class Trainer(object):
 
         contrast = tf.reduce_mean(-tf.multiply(dream, tf.subtract(dream, 1.)))
         white_ratio = tf.reduce_mean(dream)
-        print(white_ratio.shape)
         black_ratio = 1. - white_ratio
         # opacities = tf.clip_by_value(v0[1], 0., 1.)
         opacities = v0[1]  # tf.clip_by_value(v0[1], 0., 1.)
@@ -267,7 +231,6 @@ class Trainer(object):
 
         saver = tf.train.Saver()
         self.model = locals()
-        # self.model["dream_points"] = init["dream_points"]
 
     def preprocess_input(self, x):
         return np.reshape(x, [-1, self.parameters["input_size"], self.parameters["input_size"], 1])
@@ -326,25 +289,7 @@ class Trainer(object):
         print("Model values restored from checkpoint: {}".format(checkpoint_path))
 
     def imagine_classes(self):
-        pts_num = self.parameters["dream_points_num"]
-        # initial_points = np.zeros([pts_num, 2])
-        # for i in range():
-        #     angle = 2. * math.pi * i / pts_num + 0.1 * 2. * math.pi
-        #     initial_points[i, :] += 15. * np.array([math.sin(angle), math.cos(angle)])
-        #     initial_points[i, 1] *= 1.3
-        #     initial_points[i, :] += [42, 42]
-        # initial_points = np.tile(initial_points, [10, 1, 1])
-        # initial_points = initial_points.reshape([10, self.parameters["dream_points_num"], 1, 1, 2, 1])
-
         class_vectors = np.eye(self.parameters["class_num"])
-        # print(self.model.keys())
-        # print(self.model)
-        # self.session.run(
-        #     tf.assign(
-        #         self.model["dream_points"],
-        #         initial_points
-        #     )
-        # )
         blank_x = np.zeros([1, 28, 28, 1])
 
         for step in range(self.parameters["dreaming_steps"] + 1):
@@ -355,9 +300,8 @@ class Trainer(object):
 
             opt_target = self.model["dreaming_step_2"]
 
-            _ = self.session.run(
+            self.session.run(
                 fetches=[
-                    # self.model["dream_points"],
                     opt_target,
                 ],
                 feed_dict={
@@ -376,7 +320,6 @@ class Trainer(object):
                 self.model["white_ratio"],
                 self.model["dream"],
                 self.model["result"],
-                # self.model["dream_points"]
             ],
             feed_dict={
                 self.model["x"]: blank_x,
@@ -403,6 +346,7 @@ class Trainer(object):
 
 def main(argv):
     with tf.Session() as session:
+        # from tensorflow.python import debug as tf_debug
         # sess = tf_debug.LocalCLIDebugWrapperSession(session)
         # sess.add_tensor_filter("has_inf_or_nan", tf_debug.has_inf_or_nan)
         sess = session
