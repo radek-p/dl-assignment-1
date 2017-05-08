@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 import sys
 
-import math
 import numpy as np
 import tensorflow as tf
 from PIL import Image
@@ -18,7 +17,7 @@ class LayerBuilder(object):
         if parameters is not None:
             self.parameters.update(parameters)
 
-    def conv2d_with_bn(self, signal, filter_size, in_channels, out_channels, basename="conv_layer"):
+    def conv2d_with_bn(self, signal, filter_size, in_channels, out_channels, is_training, basename="conv_layer"):
         # create trainable variables for the layer
         W = tf.Variable(
             tf.truncated_normal([filter_size, filter_size, in_channels, out_channels], stddev=0.1),
@@ -30,11 +29,25 @@ class LayerBuilder(object):
         # apply convolution filters
         signal = tf.nn.conv2d(signal, W, strides=[1, 1, 1, 1], padding="SAME")
 
+        moving_average_obj = tf.train.ExponentialMovingAverage(decay=0.9999)
+
         # normalize
-        mean = tf.reduce_mean(signal, axis=[0, 1, 2])
-        signal -= mean
-        variance = tf.reduce_mean(tf.square(signal), axis=[0, 1, 2])
+        batch_mean = tf.reduce_mean(signal, axis=[0, 1, 2])
+        trained_mean = tf.Variable(tf.constant(0.2, shape=[out_channels]), False,
+                                   name="{}_trained_mean".format(basename))
+        # trained_mean = moving_average_obj.average(batch_mean)
+        mean_update = tf.assign(trained_mean, trained_mean * 0.9999 + batch_mean * 0.0001)
+        signal -= tf.cond(is_training, lambda: batch_mean, lambda: trained_mean)
+
+        batch_variance = tf.reduce_mean(tf.square(signal), axis=[0, 1, 2])
+        trained_variance = tf.Variable(tf.constant(0.4, shape=[out_channels]), False,
+                                       name="{}_trained_variance".format(basename))
+        # trained_variance = moving_average_obj.average(batch_variance)
+        variance_update = tf.assign(trained_variance, trained_variance * 0.9999 + batch_variance * 0.0001)
+        variance = tf.cond(is_training, lambda: batch_variance, lambda: trained_variance)
         signal /= tf.sqrt(variance + self.parameters["epsilon"])
+
+        # update_moving_average_op = moving_average_obj.apply([batch_mean, batch_variance])
 
         # scale and shift
         signal = gamma * signal + beta
@@ -104,53 +117,29 @@ class Trainer(object):
         coords = np.stack([coord1, coord2], 2)
         coords = np.reshape(coords, [1, 1, big_dream_size, big_dream_size, 2, 1])
 
+
+        # Draw eight segment circle approximation
+        rot = np.array([[0, -1], [1, 0]])
+        circle_points = [np.array([0, -6]), np.array([4.5, -4.5])]
+        for _ in range(7):
+            circle_points.append(np.matmul(rot, circle_points[-2]))
+        circle1 = np.array(list(zip(circle_points[:-1], circle_points[1:])), dtype=np.float32)
+        circle2 = circle1.copy()
+        circle1[:, :, 1] -= 6.
+        circle2[:, :, 1] += 6.
+
+        horizontal_lines = [[(x, y), (0, y)] for y in [-12, 0, 12] for x in [-6, 6]]
+        vertical_lines = [[(x, y), (x, y + 6)] for y in [-12, -6, 0, 6] for x in [-6, 6]]
+        frame = np.array(horizontal_lines + vertical_lines, dtype=np.float32)
+
+        diagonal = np.array([[(6, -12), (0, 12)]], dtype=np.float32)
+
+        line_segments = np.concatenate((circle1, circle2, frame, diagonal), 0)
+        # line_segments -= [6, 12]
+        line_segments *= 0.66 # .74, .70
+        # line_segments *= (angles + 1.)[:,]
         center = np.array([14, 14])
-        l = 6
-        circle = np.array([
-            [(1.5, 1.5), (6, 0)],
-            [(1.5, 1.5), (0, 6)],
-            [(10.5, 1.5), (6, 0)],
-            [(10.5, 1.5), (12, 6)],
-
-            [(1.5, 10.5), (6, 12)],
-            [(1.5, 10.5), (0, 6)],
-            [(10.5, 10.5), (6, 12)],
-            [(10.5, 10.5), (12, 6)],
-        ], dtype=np.float32)
-
-        circle2 = circle.copy()
-        circle2[:, :, 1] += 12.
-
-        frame = np.array([
-            [(0, 0), (l, 0)],
-            [(l, 0), (2 * l, 0)],
-
-            [(0, 0), (0, l)],
-            [(0, l), (0, 2 * l)],
-            [(2 * l, 0), (2 * l, l)],
-            [(2 * l, l), (2 * l, 2 * l)],
-
-            [(0, 2 * l), (l, 2 * l)],
-            [(l, 2 * l), (2 * l, 2 * l)],
-
-            [(0, 2 * l), (0, 3 * l)],
-            [(0, 3 * l), (0, 4 * l)],
-            [(2 * l, 2 * l), (2 * l, 3 * l)],
-            [(2 * l, 3 * l), (2 * l, 4 * l)],
-
-            [(0, 4 * l), (l, 4 * l)],
-            [(l, 4 * l), (2 * l, 4 * l)],
-        ], dtype=np.float32)
-
-        diagonal = np.array([
-            [(12, 0), (6, 24)],
-            # [(12, 6), (0, 18)]
-        ], dtype=np.float32)
-
-        line_segments = np.concatenate((circle, circle2, frame, diagonal), 0)
-        line_segments -= [6, 12]
-        line_segments *= 0.8
-        line_segments += center
+        line_segments += center - [1, 1]
 
         # p1 = dream_points[:, 0::2, :, :]
         # p1 = p1[:, :-1, :, :]
@@ -186,6 +175,9 @@ class Trainer(object):
         p2 = p2.reshape([dream_count, dream_points_num, 1, 1, 2, 1])
         # p2 = p1 + tf.stack([tf.sin(angles), tf.cos(angles)], 4) * 4.
 
+        angles = tf.reshape(angles, [dream_count, dream_points_num, 1, 1, 1, 1])
+        p1 = p1 * (angles + 1.)
+        p2 = p2 * (angles + 1.)
         _v = coords - p1
         _s = p1 - p2
         _s = tf.tile(_s, [1, 1, big_dream_size, big_dream_size, 1, 1])
@@ -199,7 +191,6 @@ class Trainer(object):
         d2 = tf.matmul(z, z, True)
 
         projects_on_segment = tf.sigmoid((tf.sqrt(d + 1e-6) - tf.sqrt(d2 + 1e-6)) * 2.)
-        # projects_on_segment = tf.sigmoid(d - d2)
 
         projects_on_segment = tf.reshape(projects_on_segment,
                                          [dream_count, line_segments_num, big_dream_size, big_dream_size, 1])
@@ -209,12 +200,8 @@ class Trainer(object):
         dist = tf.sqrt(dots + 1e-6)
         is_close_to_segment = tf.reduce_max(tf.sigmoid((0.5 - dist) * 2.), [4])
 
-        big_dream = projects_on_segment * is_close_to_segment * opacities
-        big_dream = tf.clip_by_value(tf.reduce_sum(big_dream, 1), 0., 1.)
-        # big_dream = tf.reduce_max(tf.sigmoid(projection - p1) * tf.sigmoid(p2 - projection), [1, 4])
-        # print("big_dream.shape", big_dream.shape)
-        # dream = tf.image.resize_bilinear(big_dream, [28, 28], name="dream")
-        dream = big_dream
+        dream = projects_on_segment * is_close_to_segment * opacities
+        dream = tf.clip_by_value(tf.reduce_sum(dream, 1), 0., 1.)
 
         return dream, locals(), trainable_variables
 
@@ -224,6 +211,7 @@ class Trainer(object):
 
         # Model switches
         is_dreaming = tf.placeholder(tf.bool, name="is_dreaming")
+        is_training = tf.placeholder(tf.bool, name="is_training")
         keep_probability = tf.placeholder(tf.float32, name="keep_probability")
 
         # Network placeholders and gates
@@ -235,10 +223,10 @@ class Trainer(object):
         signal = tf.cond(is_dreaming, lambda: dream, lambda: x)
 
         # Layers
-        signal, cn1, v1 = self.layers.conv2d_with_bn(signal, 5, 1, 48, "cn1")
+        signal, cn1, v1 = self.layers.conv2d_with_bn(signal, 5, 1, 48, is_training, "cn1")
         signal = tf.nn.relu(signal)
         signal, mp1 = self.layers.max_pool(signal, 2, "mp1")
-        signal, cn2, v2 = self.layers.conv2d_with_bn(signal, 5, 48, 64, "cn2")
+        signal, cn2, v2 = self.layers.conv2d_with_bn(signal, 5, 48, 64, is_training, "cn2")
         signal = tf.nn.relu(signal)
         signal, mp2 = self.layers.max_pool(signal, 2, "mp2")
         signal = tf.reshape(signal, [-1, 7 * 7 * 64])
@@ -272,7 +260,9 @@ class Trainer(object):
 
         # optimize_white_balance = dreaming_optimizer.minimize(cross_entropy + white_ratio * 100, var_list=v0)
         dreaming_step_1 = dreaming_optimizer.minimize(
-            cross_entropy + tf.square(white_ratio - 0.12) * 100 + opacities_contrast * 30, var_list=v0)
+            cross_entropy + tf.square(white_ratio - 0.02) * 100 + opacities_contrast * 30, var_list=v0)
+        # dreaming_step_2 = dreaming_optimizer.minimize(cross_entropy, var_list=v0)
+        dreaming_step_1 = dreaming_optimizer.minimize(cross_entropy + tf.square(white_ratio - 0.11) * 100, var_list=v0)
         dreaming_step_2 = dreaming_optimizer.minimize(cross_entropy, var_list=v0)
 
         saver = tf.train.Saver()
@@ -291,11 +281,18 @@ class Trainer(object):
             x = self.preprocess_input(x)
 
             self.session.run(
-                fetches=self.model["training_step"],
+                fetches=[
+                    self.model["training_step"],
+                    self.model["cn1"]["mean_update"],
+                    self.model["cn2"]["mean_update"],
+                    self.model["cn1"]["variance_update"],
+                    self.model["cn2"]["variance_update"],
+                ],
                 feed_dict={
                     self.model["x"]: x,
                     self.model["y"]: y,
                     self.model["is_dreaming"]: False,
+                    self.model["is_training"]: True,
                     self.model["keep_probability"]: 0.5,
                 }
             )
@@ -312,6 +309,7 @@ class Trainer(object):
                 self.model["x"]: self.preprocess_input(self.input_data.test.images),
                 self.model["y"]: self.input_data.test.labels,
                 self.model["is_dreaming"]: False,
+                self.model["is_training"]: True,
                 self.model["keep_probability"]: 1.,
             }
         )
@@ -366,14 +364,16 @@ class Trainer(object):
                     self.model["x"]: blank_x,
                     self.model["y"]: class_vectors,
                     self.model["is_dreaming"]: True,
+                    self.model["is_training"]: False,
                     self.model["keep_probability"]: 1.0,
                 }
             )
 
     def imagine_classes__report_stats(self, step, blank_x, class_vectors):
 
-        results, softmax_v = self.session.run(
+        wr, results, softmax_v = self.session.run(
             fetches=[
+                self.model["white_ratio"],
                 self.model["dream"],
                 self.model["result"],
                 # self.model["dream_points"]
@@ -382,13 +382,14 @@ class Trainer(object):
                 self.model["x"]: blank_x,
                 self.model["y"]: class_vectors,
                 self.model["is_dreaming"]: True,
+                self.model["is_training"]: False,
                 self.model["keep_probability"]: 1.0,
             }
         )
 
         class_num = self.parameters["class_num"]
         probs = {i: softmax_v[i, i] for i in range(class_num)}
-        print("\n", step, probs)
+        print("\n", step, ", wr: ", wr, probs)
 
         results = np.reshape(results, [-1, self.parameters["input_size"], self.parameters["input_size"]])
         results = np.clip(255 * results, 0, 255).astype(np.uint8)
