@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import argparse
 import sys
 import numpy as np
 import tensorflow as tf
@@ -332,21 +333,34 @@ class Trainer(object):
 
 
 def main(argv):
+    parser = argparse.ArgumentParser(prog='main.py')
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('-t', '--training', action='store_true', default=False,
+                       help="the model is created and trained from scratch")
+    group.add_argument('-d', '--dreaming', action='store_true', default=False,
+                       help="pre-trained model is used to create images that maximize class probabilities")
+    parser.add_argument('checkpoint_dir',
+                        help="directory that the checkpoint should be stored in / loaded from (it must exist!)")
+    parser.add_argument('checkpoint_name',
+                        help="name of a checkpoint (without .ckpt suffix)")
+    options = parser.parse_args(argv)
+
     with tf.Session() as session:
         # from tensorflow.python import debug as tf_debug
         # sess = tf_debug.LocalCLIDebugWrapperSession(session)
         # sess.add_tensor_filter("has_inf_or_nan", tf_debug.has_inf_or_nan)
         sess = session
         mnist = mnist_input.read_data_sets("./data/", one_hot=True)
-        trainer = Trainer(sess, mnist)
+        trainer = Trainer(sess, mnist, parameters={
+            "save_path_prefix": options.checkpoint_dir
+        })
 
-        should_train = False
-        trainer.create_model(should_train)
-        if should_train:
+        trainer.create_model(options.training)
+        if options.training:
             trainer.train_model()
-            trainer.save_trained_values("checkpoint1")
+            trainer.save_trained_values(options.checkpoint_name)
         else:
-            trainer.load_trained_values("checkpoint1")
+            trainer.load_trained_values(options.checkpoint_name)
             trainer.imagine_classes()
 
 
