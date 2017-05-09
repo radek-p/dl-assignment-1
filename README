@@ -1,0 +1,90 @@
+Rozwiązanie pierwszego zadania zaliczeniowego z 'Głębokich sieci neuronowych'.
+
+Autor: Radosław Piórkowski
+Nr indeksu: 335451
+
+
+Zawartość:
+    1. Opis rozwiązania
+    2. Środowisko i uruchamianie
+
+
+1. Opis rozwiązania
+===================
+
+    Część 1. - rozpoznawanie cyfr
+    -----------------------------
+
+    Architektura sieci neuronowej użytej w rozwiązaniu bazuje na opisie zawartym w tutorialu
+    Deep MNIST for Experts (https://www.tensorflow.org/get_started/mnist/pros).
+
+    Warstwy:
+      - konwolucyjna, 48 filtrów 5x5, z Batch Normalization
+      - max pooling 2x2
+      - konwolucyjna, 64 filtry 5x5, z Batch Normalization
+      - max pooling 2x2
+      - w pełni połączona, 1024 wyjścia
+      - dropout
+      - w pełni połączona, 10 wyjść
+      - softmax
+
+    Różnice w porównaniu do sieci z tutorialu:
+      - Batch Normalization w warstwach konwolucyjnych,
+      - 48 filtrów w pierwszej warstwie zamiast 32.
+
+    Trening:
+      - 10 000 iteracji, w każdej batch rozmiaru 100
+      - osiągana dokładność na zbiorze testowym po treningu waha się w przedziale 99.1% -- 99.4%
+
+    Część 2. - generowanie obrazków
+    -------------------------------
+
+    Zaimplementowano dwa różne algorytmy:
+
+    a) pixels -- uczonym parametrem są wartości pikseli obrazka. Cechy szczególne:
+        -- inicjalizacja obrazka przy pomocy rozmytego obrazka v_initial.png
+        -- kroki optymalizatora przeplatane z lekkim rozmywaniem obrazka,
+           w celu osiągnięcia atrakcyjniejszych wizualnie wyników
+           (bez rozmycia nie było prawie wcale widać, że na obrazku miała być cyfra)
+
+    b) lines -- korzystający ze wstępnie zdefiniowango zbioru 31 odcinków. Cechy szczególne:
+        -- uczone parametry -- 62 liczby typu float32 na klasę:
+            -> przezroczystość odcinka,
+            -> skala odcinka względem środka obrazu.
+        -- algorytm daje dużo lepsze efekty niż 'pixels'
+        -- odcinki rysowane są wyłącznie przy pomocy podstawowych operacji bibliotek tensorflow oraz numpy,
+           pozwala to na optymalizowanie ich parametrów przy pomocy standardowych algorytmów optymalizacji
+           z biblioteki tensorflow.
+
+    Należy zauważyć, że oba zastosowane algorytmy nakładają na wizualizacje pewne ograniczenia
+    (rozmywanie; pozycje odcinków), dlatego osiągane prawdopodobieństwa przynależności do klas
+    mają wartość z przedziału (.999, .9999). We wcześniejszych podejściach (niezałączone w rozwiązaniu)
+    pozbawionych tych ograniczeń możliwe było osiągnięcie wyników z większą liczbą dziewiątek po kropce,
+    jednak generowane obrazki były dużo niższej jakości (nie przypominały cyfr).
+
+Środowisko i uruchamianie
+=========================
+
+Program został napisany w wersji Pythona 3.5. Lista zależności znajduje się w pliku pip freeze > requirements.txt.
+
+Trening sieci uruchamiany poleceniem:
+
+    python main.py --training
+
+    Po wykonaniu tego polecenia w katalogu checkpoints zostanie zapisany stan wytrenowanej sieci.
+    Katalog checkpoints _musi_ istnieć przed wykonaniem tego polecenia.
+
+
+Generowanie obrazków maksymalizujących prawdopodobieństwa:
+
+    python main.py --dreaming {pixels|lines} -o visualization/{pixels|lines}
+
+    (należy wprost wskazać wybrany algorytm generowania obrazków)
+    Katalog podany w opcji -o musi istnieć przed wykonaniem komendy.
+
+Możliwa jest zmiana miejsca przechowywania checkpointów.
+Więcej informacji na temat dostępnych opcji po uruchomieniu programu z opcją -h.
+
+
+
+
