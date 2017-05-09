@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 import sys
-
 import numpy as np
 import tensorflow as tf
 from PIL import Image
@@ -86,6 +85,7 @@ class Trainer(object):
             "dreaming_steps": 2000,
             "save_path_prefix": "./models3",
             "line_segments_num": 31,
+            "batch_size": 100,
         }
         if parameters is not None:
             self.parameters.update(parameters)
@@ -137,8 +137,8 @@ class Trainer(object):
         coord1 = np.broadcast_to(np.arange(canvas_size, dtype=np.float32), [canvas_size, canvas_size])
         coord2 = coord1.T
 
-        coords = np.stack([coord1, coord2], 2)
-        coords = np.reshape(coords, [1, 1, canvas_size, canvas_size, 2, 1])
+        coordinates = np.stack([coord1, coord2], 2)
+        coordinates = np.reshape(coordinates, [1, 1, canvas_size, canvas_size, 2, 1])
 
         line_segments = self.prepare_initial_line_segments()
         line_segments = np.broadcast_to(line_segments, [class_num, line_segments_num, 2, 2])
@@ -147,7 +147,7 @@ class Trainer(object):
         line_segments = tf.reshape(line_segments, [class_num, line_segments_num, 1, 1, 2, 2, 1])
         p1, p2 = tf.unstack(line_segments, axis=4)
 
-        v = coords - p1
+        v = coordinates - p1
         s = p1 - p2
         s = tf.tile(s, [1, 1, canvas_size, canvas_size, 1, 1])
         s_norm2 = tf.matmul(s, s, True)
@@ -161,7 +161,7 @@ class Trainer(object):
         projects_on_segment = tf.reshape(projects_on_segment,
                                          [class_num, line_segments_num, canvas_size, canvas_size, 1])
 
-        l = coords - projection
+        l = coordinates - projection
         l_norm = tf.sqrt(tf.matmul(l, l, True) + epsilon)
         is_close_to_segment = tf.reduce_max(tf.sigmoid((0.5 - l_norm) * 2.), [4])
 
@@ -188,17 +188,17 @@ class Trainer(object):
         signal = tf.cond(is_dreaming, lambda: canvas, lambda: x)
 
         # Layers
-        signal, cn1, v1 = self.layers.conv2d_with_bn(signal, 5, 1, 48, is_training, "cn1")
+        signal, conv1, v1 = self.layers.conv2d_with_bn(signal, 5, 1, 48, is_training, basename="conv1")
         signal = tf.nn.relu(signal)
-        signal, mp1 = self.layers.max_pool(signal, 2, "mp1")
-        signal, cn2, v2 = self.layers.conv2d_with_bn(signal, 5, 48, 64, is_training, "cn2")
+        signal, mp1 = self.layers.max_pool(signal, 2, basename="mp1")
+        signal, conv2, v2 = self.layers.conv2d_with_bn(signal, 5, 48, 64, is_training, basename="conv2")
         signal = tf.nn.relu(signal)
-        signal, mp2 = self.layers.max_pool(signal, 2, "mp2")
+        signal, mp2 = self.layers.max_pool(signal, 2, basename="mp2")
         signal = tf.reshape(signal, [-1, 7 * 7 * 64])
-        signal, fc1, v3 = self.layers.fully_connected(signal, 7 * 7 * 64, 1024, "fc1")
+        signal, fc1, v3 = self.layers.fully_connected(signal, 7 * 7 * 64, 1024, basename="fc1")
         signal = tf.nn.relu(signal)
-        signal = tf.nn.dropout(signal, keep_probability)
-        signal, fc2, v4 = self.layers.fully_connected(signal, 1024, 10, "fc2")
+        signal = tf.nn.dropout(signal, keep_probability, name="dropout")
+        signal, fc2, v4 = self.layers.fully_connected(signal, 1024, 10, basename="fc2")
         result = tf.nn.softmax(signal)
 
         # Measures
@@ -227,16 +227,16 @@ class Trainer(object):
         self.session.run(tf.global_variables_initializer())
 
         for step in range(self.parameters["training_steps"] + 1):
-            x, y = self.input_data.train.next_batch(100)
+            x, y = self.input_data.train.next_batch(self.parameters["batch_size"])
             x = self.preprocess_input(x)
 
             self.session.run(
                 fetches=[
                     self.model["training_step"],
-                    self.model["cn1"]["mean_update"],
-                    self.model["cn2"]["mean_update"],
-                    self.model["cn1"]["variance_update"],
-                    self.model["cn2"]["variance_update"],
+                    self.model["conv1"]["mean_update"],
+                    self.model["conv2"]["mean_update"],
+                    self.model["conv1"]["variance_update"],
+                    self.model["conv2"]["variance_update"],
                 ],
                 feed_dict={
                     self.model["x"]: x,
