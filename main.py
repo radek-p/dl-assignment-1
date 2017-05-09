@@ -1,4 +1,9 @@
 #!/usr/bin/env python
+
+# Autor:
+# Radosław Piórkowski
+# nr indeksu: 335451
+
 import argparse
 import sys
 from enum import Enum
@@ -35,20 +40,23 @@ class LayerBuilder(object):
 
         # apply convolution filters
         signal = tf.nn.conv2d(signal, W, strides=[1, 1, 1, 1], padding="SAME")
+        decay = 0.9999
 
         # normalize
         batch_mean = tf.reduce_mean(signal, axis=[0, 1, 2])
         trained_mean = tf.Variable(tf.constant(0.2, shape=[out_channels]), False,
                                    name="{}_trained_mean".format(basename))
-        mean_update = tf.assign(trained_mean, trained_mean * 0.9999 + batch_mean * 0.0001)
+        mean_update = tf.assign(trained_mean, trained_mean * decay + batch_mean * (1. - decay))
         signal -= tf.cond(bn_use_actual_moments, lambda: batch_mean, lambda: trained_mean)
 
         batch_variance = tf.reduce_mean(tf.square(signal), axis=[0, 1, 2])
         trained_variance = tf.Variable(tf.constant(0.4, shape=[out_channels]), False,
                                        name="{}_trained_variance".format(basename))
-        variance_update = tf.assign(trained_variance, trained_variance * 0.9999 + batch_variance * 0.0001)
+        variance_update = tf.assign(trained_variance, trained_variance * decay + batch_variance * (1. - decay))
         variance = tf.cond(bn_use_actual_moments, lambda: batch_variance, lambda: trained_variance)
         signal /= tf.sqrt(variance + self.parameters["epsilon"])
+
+        moments_update_op = tf.group(mean_update, variance_update)
 
         # scale and shift
         signal = gamma * signal + beta
@@ -188,7 +196,6 @@ class Trainer(object):
 
         # Placeholders
         is_dreaming = tf.placeholder(tf.bool, name="is_dreaming")
-        # use_dream_1 = tf.placeholder(tf.bool, name="use_dream_1")
         bn_use_actual_moments = tf.placeholder(tf.bool, name="bn_use_actual_moments")
         dropout_keep_probability = tf.placeholder(tf.float32, name="dropout_keep_probability")
 
@@ -208,14 +215,20 @@ class Trainer(object):
         # Layers
         signal, conv1, v1 = self.layers.conv2d_with_bn(signal, 5, 1, 48, bn_use_actual_moments, basename="conv1")
         signal = tf.nn.relu(signal)
+
         signal, mp1 = self.layers.max_pool(signal, 2, basename="mp1")
+
         signal, conv2, v2 = self.layers.conv2d_with_bn(signal, 5, 48, 64, bn_use_actual_moments, basename="conv2")
         signal = tf.nn.relu(signal)
+
         signal, mp2 = self.layers.max_pool(signal, 2, basename="mp2")
         signal = tf.reshape(signal, [-1, 7 * 7 * 64])
+
         signal, fc1, v3 = self.layers.fully_connected(signal, 7 * 7 * 64, 1024, basename="fc1")
         signal = tf.nn.relu(signal)
+
         signal = tf.nn.dropout(signal, dropout_keep_probability, name="dropout")
+
         signal, fc2, v4 = self.layers.fully_connected(signal, 1024, 10, basename="fc2")
         result = tf.nn.softmax(signal)
 
@@ -225,7 +238,7 @@ class Trainer(object):
         error = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(labels=y, logits=signal, name="error"))
         is_correct = tf.equal(tf.argmax(result, 1), tf.argmax(y, 1), name="is_correct")
         accuracy = tf.reduce_mean(tf.cast(is_correct, tf.float32), name="accuracy")
-        white_ratio = tf.reduce_mean(canvas)
+        # white_ratio = tf.reduce_mean(canvas)
         contrast = tf.reduce_mean(-tf.multiply(canvas, tf.subtract(canvas, 1.)))
 
         # Training operations
@@ -257,10 +270,8 @@ class Trainer(object):
             self.session.run(
                 fetches=[
                     self.model["training_opt_op"],
-                    self.model["conv1"]["mean_update"],
-                    self.model["conv2"]["mean_update"],
-                    self.model["conv1"]["variance_update"],
-                    self.model["conv2"]["variance_update"],
+                    self.model["conv1"]["moments_update_op"],
+                    self.model["conv1"]["moments_update_op"],
                 ],
                 feed_dict={
                     self.model["x"]: x,
@@ -277,13 +288,9 @@ class Trainer(object):
                 print(".", end="", flush=True)
 
     def train_model__report_stats(self, step):
-        accuracy, tm1, tv1, tm2, tv2 = self.session.run(
+        accuracy = self.session.run(
             fetches=[
                 self.model["accuracy"],
-                self.model["conv1"]["trained_mean"],
-                self.model["conv1"]["trained_variance"],
-                self.model["conv2"]["trained_mean"],
-                self.model["conv2"]["trained_variance"],
             ],
             feed_dict={
                 self.model["x"]: self.preprocess_input(self.input_data.test.images),
@@ -294,10 +301,6 @@ class Trainer(object):
             }
         )
         print("\n[{}] accuracy: {}".format(step, accuracy))
-        # print(tm1)
-        # print(tv1)
-        # print(tm2)
-        # print(tv2)
 
     def save_trained_values(self, name):
         save_path = self.model["saver"].save(self.session,
@@ -368,9 +371,9 @@ class Trainer(object):
         class_num = self.parameters["class_num"]
         probs = {i: softmax_v[i, i] for i in range(class_num)}
         smallest_prob = min(probs.values())
-        print("\n", step,
-              "smallest prob:", smallest_prob,
-              "class probabilities:", probs)
+        print("\nstep:", step,
+              "\nsmallest prob:", smallest_prob,
+              "\nclass probabilities:", probs)
 
         results = np.reshape(results, [-1, self.parameters["input_size"], self.parameters["input_size"]])
         results = np.clip(255 * results, 0, 255).astype(np.uint8)
