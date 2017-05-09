@@ -1,6 +1,6 @@
 .idea/
 data/
-outputs/
-models3/
+visualizations/
+checkpoints/
 experiment*.py
 .DS_Store
