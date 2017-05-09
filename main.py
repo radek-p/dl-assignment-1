@@ -143,7 +143,8 @@ class Trainer(object):
 
         line_segments = self.prepare_initial_line_segments()
         line_segments = np.broadcast_to(line_segments, [class_num, line_segments_num, 2, 2])
-        line_segments = line_segments * tf.reshape(scales, [class_num, line_segments_num, 1, 1])
+        line_segments = line_segments * tf.reshape(scales, [class_num, line_segments_num, 1, 1])  # enabled scaling
+        # line_segments = line_segments * tf.ones([class_num, line_segments_num, 1, 1])  # disabled scaling
         line_segments += np.array([13, 13])
         line_segments = tf.reshape(line_segments, [class_num, line_segments_num, 1, 1, 2, 2, 1])
         p1, p2 = tf.unstack(line_segments, axis=4)
@@ -175,10 +176,10 @@ class Trainer(object):
         print("Creating the model")
         input_size = self.parameters["input_size"]
 
-        # Model switches
+        # Placeholders
         is_dreaming = tf.placeholder(tf.bool, name="is_dreaming")
         is_training = tf.placeholder(tf.bool, name="is_training")
-        keep_probability = tf.placeholder(tf.float32, name="keep_probability")
+        dropout_keep_probability = tf.placeholder(tf.float32, name="dropout_keep_probability")
 
         # Network placeholders and gates
         x = tf.placeholder(tf.float32, [None, input_size, input_size, 1], name="x")
@@ -198,7 +199,7 @@ class Trainer(object):
         signal = tf.reshape(signal, [-1, 7 * 7 * 64])
         signal, fc1, v3 = self.layers.fully_connected(signal, 7 * 7 * 64, 1024, basename="fc1")
         signal = tf.nn.relu(signal)
-        signal = tf.nn.dropout(signal, keep_probability, name="dropout")
+        signal = tf.nn.dropout(signal, dropout_keep_probability, name="dropout")
         signal, fc2, v4 = self.layers.fully_connected(signal, 1024, 10, basename="fc2")
         result = tf.nn.softmax(signal)
 
@@ -244,7 +245,7 @@ class Trainer(object):
                     self.model["y"]: y,
                     self.model["is_dreaming"]: False,
                     self.model["is_training"]: True,
-                    self.model["keep_probability"]: 0.5,
+                    self.model["dropout_keep_probability"]: 0.5,
                 }
             )
 
@@ -254,17 +255,27 @@ class Trainer(object):
                 print(".", end="", flush=True)
 
     def train_model__report_stats(self, step):
-        accuracy = self.session.run(
-            fetches=self.model["accuracy"],
+        accuracy, tm1, tv1, tm2, tv2 = self.session.run(
+            fetches=[
+                self.model["accuracy"],
+                self.model["conv1"]["trained_mean"],
+                self.model["conv1"]["trained_variance"],
+                self.model["conv2"]["trained_mean"],
+                self.model["conv2"]["trained_variance"],
+            ],
             feed_dict={
                 self.model["x"]: self.preprocess_input(self.input_data.test.images),
                 self.model["y"]: self.input_data.test.labels,
                 self.model["is_dreaming"]: False,
                 self.model["is_training"]: True,
-                self.model["keep_probability"]: 1.,
+                self.model["dropout_keep_probability"]: 1.,
             }
         )
         print("\n[{}] accuracy: {}".format(step, accuracy))
+        print(tm1)
+        print(tv1)
+        print(tm2)
+        print(tv2)
 
     def save_trained_values(self, name):
         save_path = self.model["saver"].save(self.session,
@@ -297,7 +308,7 @@ class Trainer(object):
                     self.model["y"]: class_vectors,
                     self.model["is_dreaming"]: True,
                     self.model["is_training"]: False,
-                    self.model["keep_probability"]: 1.0,
+                    self.model["dropout_keep_probability"]: 1.0,
                 }
             )
 
@@ -314,7 +325,7 @@ class Trainer(object):
                 self.model["y"]: class_vectors,
                 self.model["is_dreaming"]: True,
                 self.model["is_training"]: False,
-                self.model["keep_probability"]: 1.0,
+                self.model["dropout_keep_probability"]: 1.0,
             }
         )
 
